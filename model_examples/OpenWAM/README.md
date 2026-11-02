@@ -1,29 +1,131 @@
-# OpenWAM
+# OpenWAM 运行指南
 
 本接入参考 OpenWAM `main` 的 `ac8aab4f6ba16b1739c94df823cc444478e9dab0`，在运行时替换函数及其调用别名，模型源码不需要打补丁。使用原生 Wan 视频骨干和 ActionDiT，主要面向 `dual_system/joint_self_attn` 训练。
 
 优化接入基线为 `1204dde1b9e9c232131fc99a3f2c6b78330e7f64`。请使用该上游基线，不要叠加已经内置同类优化的 OpenWAM 分支。随包配置记录了基线函数的 AST 身份；目前完成的是必要静态检查，尚未在训练环境验证多卡正确性、数值、收敛或性能。
 
-## 启动
+## 环境准备
 
-在已安装 OpenWAM 训练依赖和 TurboPhysAI 的 HCU 环境，从 OpenWAM 仓库根目录执行。保留原训练参数，只在命令前增加 Turbo：
+以下命令在 Linux HCU 训练容器内、同一个 Bash 会话中依次执行。先激活已有的 OpenWAM 训练环境：DTK、HCU PyTorch、FlashAttention、DeepSpeed 和 Accelerate 应已匹配；Turbo 源码构建还需要 hipDNN、Ninja 及编译器，详见[安装指南](../../docs/zh/get_started/installation.md#从源码安装)。在线优化配方还需要匹配当前 PyTorch/DTK 的 Lightop。不要直接套用 Cosmos 分支的镜像版本替换现有 OpenWAM 训练环境。
+
+### 准备代码并切换版本
+
+当前接入尚在 Draft PR 分支，Turbo 从 fork 的 `feat/openwam` 获取；OpenWAM 从来源仓库获取，创建固定在**未内置优化的基线提交**上的本地分支。`ac8aab4` 是优化的参考来源，运行时 OpenWAM 应切换到 `1204dde1`。
 
 ```bash
-turbo-physai run --model openwam --log-report \
-  torchrun --nproc_per_node=8 scripts/train.py \
-    dataloader=robotwin \
-    dataloader.dataset_dir=/path/to/robotwin/dataset \
-    dataloader.variant=clean_50 \
-    '+dataloader.tasks=[blocks_ranking_size]' \
-    training.finetune_ckpt_path=/path/to/OpenWAM-Alpha-Pretrain-Foundation-Model \
-    training.num_epochs=null training.max_steps=30 training.batch_size=16 \
-    training.dataset_num_workers=8 training.save_steps=100 \
-    training.save_full_states_for_resume=false \
-    training.output_path=/path/to/output \
-    project.wandb.project=null
+export WORKSPACE=/path/to/openwam-turbo-workspace
+mkdir -p "$WORKSPACE"
+cd "$WORKSPACE"
+
+git clone --branch feat/openwam --single-branch \
+  https://github.com/iMountTai/TurboPhysAI.git TurboPhysAI
+git clone https://github.com/iMountTai/OpenWAM.git OpenWAM
+
+export TURBO_ROOT="$WORKSPACE/TurboPhysAI"
+export OPENWAM_ROOT="$WORKSPACE/OpenWAM"
+export OPENWAM_BASELINE=1204dde1b9e9c232131fc99a3f2c6b78330e7f64
+export RUN_ROOT="$WORKSPACE/openwam-runs"
+mkdir -p "$RUN_ROOT/configs"
+
+cd "$OPENWAM_ROOT"
+git switch -c turbo-baseline "$OPENWAM_BASELINE"
+test "$(git rev-parse HEAD)" = "$OPENWAM_BASELINE"
+git status --short --branch
 ```
 
-使用原有 DTK、FlashAttention、DeepSpeed、Accelerate 环境。Lightop 仅在显式设置 `lightop_norm: true` 后需要安装。没有新增强制的模型依赖。
+`WORKSPACE` 请设为实际绝对路径；两个仓库为相邻目录，配置和输出写入仓库之外的 `RUN_ROOT`。本接入通过 Turbo 在运行时安装 monkey-patch，准备好基线后直接安装和启动，无需执行 `git apply`。当前 Wan 场景无需初始化 Cosmos 子模块。
+
+### 安装代码
+
+在上面已准备好训练依赖的同一 Python 环境中安装两个仓库。`--no-deps` 保留现有 HCU 版本的 PyTorch/DeepSpeed 等依赖；它适用于依赖已经齐备的环境，不会自动补全训练依赖。全新环境需先按固定基线的 `pyproject.toml` 准备 Python 依赖，平台包使用 HCU 软件源提供的匹配版本。
+
+```bash
+cd "$OPENWAM_ROOT"
+python -m pip install -e . --no-build-isolation --no-deps
+
+cd "$TURBO_ROOT"
+python -m pip install ninja wheel setuptools
+MAX_JOBS=8 python -m pip install -e . --no-build-isolation --no-deps
+
+cd "$OPENWAM_ROOT"
+python -c "import openwam, turbo_physai; print(openwam.__file__); print(turbo_physai.__file__)"
+turbo-physai --help
+```
+
+打印路径应分别位于刚克隆的 OpenWAM 和 TurboPhysAI 目录；若落到其他 checkout，应先修正当前 Python 环境中的安装。Turbo 的原生扩展在 HCU 环境构建，本地 Windows 不执行此安装流程。
+
+## 数据与模型权重
+
+准备 RoboTwin 2.0 数据集和自包含的 OpenWAM-Alpha foundation checkpoint。下载方法见固定基线的 [Assets Preparation](https://github.com/iMountTai/OpenWAM/blob/1204dde1b9e9c232131fc99a3f2c6b78330e7f64/README.md#assets-preparation)。微调 checkpoint 目录应包含 `config.yaml`、`checkpoint_step_*.safetensors` 权重和配套 tokenizer；仅提供单独的 Wan 视频骨干目录不能替代它。
+
+```bash
+export DATASET_ROOT=/path/to/robotwin2.0/dataset
+export FOUNDATION_CKPT=/path/to/OpenWAM-Alpha-Pretrain-Foundation-Model
+test -d "$DATASET_ROOT"
+test -f "$FOUNDATION_CKPT/config.yaml"
+```
+
+数据、权重路径替换为实际绝对路径。本例固定 `dual_system/joint_self_attn`、Wan22-TI2V、ActionDiT 和 RoboTwin 的 `blocks_ranking_size` 任务。自包含 checkpoint 提供模型重建信息和冻结编码器权重，微调路径不要求原始 Wan 下载目录仍存在。
+
+## 生成优化配置并启动训练
+
+### 生成在线优化配方
+
+以下使用在线训练优化组合，包括本次迁入的预取调度和 workspace 默认限制。先复制 recipe 和 RuntimeConfig，再针对干净 OpenWAM 基线生成可运行的 OptimizationConfig；recipe 文件不能直接传给 `--optimization-config`。
+
+```bash
+cp "$TURBO_ROOT/turbo_physai/optimizations/models/openwam/configs/recipe.online.yaml" \
+  "$RUN_ROOT/configs/recipe.online.yaml"
+cp "$TURBO_ROOT/turbo_physai/optimizations/models/openwam/configs/runtime.optimized.yaml" \
+  "$RUN_ROOT/configs/runtime.optimized.yaml"
+
+cd "$OPENWAM_ROOT"
+turbo-physai optimization generate \
+  --recipe "$RUN_ROOT/configs/recipe.online.yaml" \
+  --repo "$OPENWAM_ROOT" --commit "$OPENWAM_BASELINE" \
+  --output "$RUN_ROOT/configs/optimization.online.yaml"
+```
+
+生成过程会在配置旁写入 `.optimization.online.yaml.generation.json`，运行时会校验它，移动配置时也应保留同目录下的凭据和 recipe。修改 recipe 后需重新生成；重复生成已有输出时，在生成命令后添加 `--force`。数据下载器可能修改仓库内 YAML，请使用独立资产目录和下文命令行路径覆盖，确保生成时 `git status --porcelain` 为空。
+
+### 设置训练参数并运行
+
+所有训练和缓存命令均从 `OPENWAM_ROOT` 执行。下面将公共参数保存为 Bash 数组，后续在线、缓存生成和缓存训练复用同一份数据/模型设置：
+
+```bash
+cd "$OPENWAM_ROOT"
+export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPROC_PER_NODE=8
+
+TRAIN_ARGS=(
+  model=dual_system
+  model/video_backbone=wan22_ti2v_5b
+  model/action_backbone=separate_action_dit
+  model.architecture.variant=joint_self_attn
+  dataloader=robotwin
+  "dataloader.dataset_dir=$DATASET_ROOT"
+  dataloader.variant=clean_50
+  '+dataloader.tasks=[blocks_ranking_size]'
+  "training.finetune_ckpt_path=$FOUNDATION_CKPT"
+  training.num_epochs=null training.max_steps=30 training.batch_size=16
+  training.zero_stage=2 training.offload_optimizer_device=none
+  training.gradient_accumulation_steps=1 training.dataset_num_workers=8
+  training.use_gradient_checkpointing=true
+  training.use_gradient_checkpointing_offload=false
+  training.save_steps=100 training.save_full_states_for_resume=false
+  project.wandb.project=null
+)
+
+turbo-physai run --model openwam --log-report \
+  --optimization-config "$RUN_ROOT/configs/optimization.online.yaml" \
+  --runtime-config "$RUN_ROOT/configs/runtime.optimized.yaml" \
+  torchrun --nproc_per_node="$NPROC_PER_NODE" scripts/train.py \
+    "${TRAIN_ARGS[@]}" "training.output_path=$RUN_ROOT/online"
+```
+
+按实际卡数同步调整 `HIP_VISIBLE_DEVICES` 和 `NPROC_PER_NODE`。`training.batch_size=16` 是每卡批量，需按目标显存调整；`max_steps=30` 是流程检查示例，评估稳定吞吐时应增加步数并排除编译预热。`save_steps=100` 仅改变周期保存间隔，正常结束仍会保存最终 checkpoint，需预留空间。
+
+若只运行默认基础优化，将前面复制的 recipe 换成随包 `recipe.yaml` 并重新生成配置；默认组合不会开启在线重叠等全部优化。后文说明各组选项及缓存组合。
 
 ## 优化分组
 
@@ -78,18 +180,24 @@ ZeRO-2 增加有界梯度批量入桶、owner 范围计划缓存、分区复制�
 
 原生 30 层模型中，`checkpoint_skip_layers: 12` 表示末尾 12 层不 checkpoint，前 18 层仍 checkpoint。`sac_layers: N` 选择剩余 checkpoint 层中末尾 N 层；`null` 表示全部剩余 checkpoint 层。完整 SAC 需要联合视频/动作训练、启用 gradient checkpointing、关闭 checkpoint offload，且不使用 VACE。
 
-在干净的基线仓库中生成配置：
+如需自定义，先复制 recipe 到前文的配置目录，编辑后生成配置并复用 `TRAIN_ARGS` 启动：
 
 ```bash
+cp "$TURBO_ROOT/turbo_physai/optimizations/models/openwam/configs/recipe.yaml" \
+  "$RUN_ROOT/configs/recipe.custom.yaml"
+# 在此编辑 "$RUN_ROOT/configs/recipe.custom.yaml" 中的 options。
+
+cd "$OPENWAM_ROOT"
 turbo-physai optimization generate \
-  --recipe /path/to/recipe.yaml \
-  --repo /path/to/OpenWAM \
-  --commit 1204dde1b9e9c232131fc99a3f2c6b78330e7f64 \
-  --output /path/to/optimization.yaml
+  --recipe "$RUN_ROOT/configs/recipe.custom.yaml" \
+  --repo "$OPENWAM_ROOT" --commit "$OPENWAM_BASELINE" \
+  --output "$RUN_ROOT/configs/optimization.custom.yaml"
 
 turbo-physai run --model openwam \
-  --optimization-config /path/to/optimization.yaml \
-  torchrun --nproc_per_node=8 scripts/train.py <原训练参数>
+  --optimization-config "$RUN_ROOT/configs/optimization.custom.yaml" \
+  --runtime-config "$RUN_ROOT/configs/runtime.optimized.yaml" \
+  torchrun --nproc_per_node="$NPROC_PER_NODE" scripts/train.py \
+    "${TRAIN_ARGS[@]}" "training.output_path=$RUN_ROOT/custom"
 ```
 
 随包配置使用 [generate_openwam_config.py](../../tools/generate_openwam_config.py) 从同一基线源定义生成 AST 证据及标准生成凭据，生成过程不导入模型依赖、不运行模型。需要只做静态配置生成时也可使用此工具；它仅接受上述干净基线。
@@ -112,20 +220,7 @@ turbo-physai run --model openwam \
 
 OPT-01 的 hipBLASLt 库包与配套数据目录需要由目标容器提供。`TORCH_BLAS_PREFER_HIPBLASLT=1` 只选择 backend，不会安装或切换库版本；目标环境应预先配置匹配的动态库搜索路径。
 
-在线组合：先复制 `recipe.online.yaml`，再按上一节生成配置，启动时同时指定优化配置与运行环境配置：
-
-```bash
-turbo-physai run --model openwam --log-report \
-  --optimization-config /path/to/optimization.online.yaml \
-  --runtime-config /path/to/runtime.optimized.yaml \
-  torchrun --nproc_per_node=8 scripts/train.py \
-    training.zero_stage=2 training.offload_optimizer_device=none \
-    training.gradient_accumulation_steps=1 training.dataset_num_workers=8 \
-    training.use_gradient_checkpointing=true \
-    training.use_gradient_checkpointing_offload=false <原训练参数>
-```
-
-缓存组合：复制 `recipe.cache-build.yaml` 和 `recipe.cached.yaml`，把两份中的 `vae_latent_cache_dir` 改成同一实际目录，再分别生成 OptimizationConfig。默认 T5 文件位于该目录的 `text` 子目录。先用生成配方执行下面的缓存入口，完成后将训练命令的优化配置换成 `optimization.cached.yaml`。两阶段使用相同数据窗口、模型与 checkpoint 参数；不要直接运行带 `/path/to/openwam-cache` 占位路径的配置。
+在线组合的完整生成和启动命令见前文“生成优化配置并启动训练”；缓存组合见下文“离线缓存”。两者都使用干净 OpenWAM 基线和同一套公共训练参数。
 
 | 报告项 | Turbo 对应位置 |
 | --- | --- |
@@ -145,17 +240,64 @@ turbo-physai run --model openwam --log-report \
 
 ## 离线缓存
 
-在 recipe 的副本中设置 `openwam.data.options.vae_latent_cache_dir`，生成缓存期间保持 `vae_latent_cache: false`。如需同时生成 T5 缓存，设置 `openwam.text.options.text_cache: true`，并设置 `text_cache_dir` 或复用 latent 目录的 `text` 子目录。生成配置后，从 OpenWAM 仓库根目录执行：
+沿用前面的环境变量和 `TRAIN_ARGS`，为缓存生成与缓存训练分别生成配置。下面将两份 recipe 的 `vae_latent_cache_dir` 写成同一绝对路径；生成配方保持 `vae_latent_cache: false`，训练配方为 `true`。随包缓存配方已设置 `text_cache: true`，T5 缓存默认写入 latent 目录的 `text` 子目录。
 
 ```bash
-turbo-physai run --model openwam \
-  --optimization-config /path/to/cache-build-optimization.yaml \
-  torchrun --nproc_per_node=8 --module \
-    turbo_physai.optimizations.models.openwam.cache_vae_latents \
-    dataloader=robotwin <与训练一致的数据、模型和 checkpoint 参数>
+export CACHE_ROOT="$RUN_ROOT/cache"
+cp "$TURBO_ROOT/turbo_physai/optimizations/models/openwam/configs/recipe.cache-build.yaml" \
+  "$RUN_ROOT/configs/recipe.cache-build.yaml"
+cp "$TURBO_ROOT/turbo_physai/optimizations/models/openwam/configs/recipe.cached.yaml" \
+  "$RUN_ROOT/configs/recipe.cached.yaml"
+
+python - <<'PY'
+import os
+from pathlib import Path
+import yaml
+
+for name in ("cache-build", "cached"):
+    path = Path(os.environ["RUN_ROOT"]) / "configs" / f"recipe.{name}.yaml"
+    original = path.read_text()
+    recipe = yaml.safe_load(original)
+    for group in recipe["optimization_groups"]:
+        if group["id"] == "openwam.data":
+            group["options"]["vae_latent_cache_dir"] = os.environ["CACHE_ROOT"]
+    header = original.split("schema_version:", 1)[0]
+    path.write_text(header + yaml.safe_dump(recipe, sort_keys=False))
+PY
+
+cd "$OPENWAM_ROOT"
+for name in cache-build cached; do
+  turbo-physai optimization generate \
+    --recipe "$RUN_ROOT/configs/recipe.$name.yaml" \
+    --repo "$OPENWAM_ROOT" --commit "$OPENWAM_BASELINE" \
+    --output "$RUN_ROOT/configs/optimization.$name.yaml" || break
+done
 ```
 
-缓存写完后，在训练 recipe 中启用 `vae_latent_cache: true` 并重新生成配置。缓存签名校验数据窗口、相机、尺寸、权重和文本编码设置；使用训练 split 且关闭随机视频增强。生成和训练必须使用相同配置与 checkpoint。数据 worker 采用原生 Linux fork 模式以继承运行时补丁。
+确认两份生成命令均成功后，先生成缓存：
+
+```bash
+cd "$OPENWAM_ROOT"
+turbo-physai run --model openwam \
+  --optimization-config "$RUN_ROOT/configs/optimization.cache-build.yaml" \
+  --runtime-config "$RUN_ROOT/configs/runtime.optimized.yaml" \
+  torchrun --nproc_per_node="$NPROC_PER_NODE" --module \
+    turbo_physai.optimizations.models.openwam.cache_vae_latents \
+    "${TRAIN_ARGS[@]}" "training.output_path=$RUN_ROOT/cache-build"
+```
+
+缓存入口会遍历所选任务的训练窗口，`TRAIN_ARGS` 中的 `training.max_steps=30` 不会将缓存生成限制为 30 步。缓存生成完成后，再运行缓存训练：
+
+```bash
+cd "$OPENWAM_ROOT"
+turbo-physai run --model openwam --log-report \
+  --optimization-config "$RUN_ROOT/configs/optimization.cached.yaml" \
+  --runtime-config "$RUN_ROOT/configs/runtime.optimized.yaml" \
+  torchrun --nproc_per_node="$NPROC_PER_NODE" scripts/train.py \
+    "${TRAIN_ARGS[@]}" "training.output_path=$RUN_ROOT/cached"
+```
+
+缓存签名校验数据窗口、相机、尺寸、权重和文本编码设置；使用训练 split 且关闭随机视频增强。生成和训练必须使用相同配置与 checkpoint。数据 worker 采用原生 Linux fork 模式以继承运行时补丁。
 
 ## 来源与许可证
 
