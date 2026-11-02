@@ -6,16 +6,15 @@
 
 ### 准备代码并切换版本
 
-克隆 Turbo 的 `feat/openwam` 分支，将 OpenWAM 切换到 `1204dde1`，并创建本地分支 `turbo-baseline`：
+克隆两个官方仓库，Turbo 使用 `main`；将 OpenWAM 切换到 `1204dde1`，并创建本地分支 `turbo-baseline`：
 
 ```bash
 export WORKSPACE=/path/to/openwam-turbo-workspace
 mkdir -p "$WORKSPACE"
 cd "$WORKSPACE"
 
-git clone --branch feat/openwam --single-branch \
-  https://github.com/iMountTai/TurboPhysAI.git TurboPhysAI
-git clone https://github.com/iMountTai/OpenWAM.git OpenWAM
+git clone --branch main https://github.com/HYGON-AI/TurboPhysAI.git TurboPhysAI
+git clone https://github.com/OpenWAM-Official/OpenWAM.git OpenWAM
 
 export TURBO_ROOT="$WORKSPACE/TurboPhysAI"
 export OPENWAM_ROOT="$WORKSPACE/OpenWAM"
@@ -52,7 +51,7 @@ turbo-physai --help
 
 ## 数据与模型权重
 
-准备 RoboTwin 2.0 数据集和自包含的 OpenWAM-Alpha foundation checkpoint。下载方法见固定基线的 [Assets Preparation](https://github.com/iMountTai/OpenWAM/blob/1204dde1b9e9c232131fc99a3f2c6b78330e7f64/README.md#assets-preparation)。微调 checkpoint 目录应包含 `config.yaml`、`checkpoint_step_*.safetensors` 权重和配套 tokenizer；仅提供单独的 Wan 视频骨干目录不能替代它。
+准备 RoboTwin 2.0 数据集和自包含的 OpenWAM-Alpha foundation checkpoint。下载方法见固定基线的 [Assets Preparation](https://github.com/OpenWAM-Official/OpenWAM/blob/1204dde1b9e9c232131fc99a3f2c6b78330e7f64/README.md#assets-preparation)。微调 checkpoint 目录应包含 `config.yaml`、`checkpoint_step_*.safetensors` 权重和配套 tokenizer；仅提供单独的 Wan 视频骨干目录不能替代它。
 
 ```bash
 export DATASET_ROOT=/path/to/robotwin2.0/dataset
