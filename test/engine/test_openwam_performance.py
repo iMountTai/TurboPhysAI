@@ -7,6 +7,7 @@ import ast
 import contextlib
 import copy
 import functools
+import os
 import sys
 import types
 import unittest
@@ -202,6 +203,158 @@ class AttentionPlanTest(unittest.TestCase):
         )
 
 
+class LookaheadOrderTest(unittest.TestCase):
+    def make_encoder(self):
+        kind, _ = load_definition(
+            "online_encode.py",
+            "OnlineEncoder",
+            torch=types.SimpleNamespace(no_grad=contextlib.nullcontext),
+            PreparedInputs=lambda values: types.SimpleNamespace(values=values),
+        )
+        instance = kind.__new__(kind)
+        backbone = types.SimpleNamespace()
+        instance.architecture = types.SimpleNamespace(video_backbone=backbone)
+        return instance, backbone
+
+    def test_lookahead_flag_restores_missing_and_explicit_values_on_error(self):
+        for previous in ("missing", None, False, True):
+            for fail in (False, True):
+                with self.subTest(previous=previous, fail=fail):
+                    encoder, backbone = self.make_encoder()
+                    if previous != "missing":
+                        backbone._openwam_video_first = previous
+
+                    def prepare(batch):
+                        self.assertIs(backbone._openwam_video_first, True)
+                        self.assertEqual(batch, ["batch"])
+                        if fail:
+                            raise RuntimeError("encode failed")
+                        return {"prepared": True}
+
+                    encoder.architecture.prepare_inputs = prepare
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, "encode failed"):
+                            encoder._prepare_lookahead("batch")
+                    else:
+                        self.assertEqual(
+                            encoder._prepare_lookahead("batch").values,
+                            {"prepared": True},
+                        )
+                    if previous == "missing":
+                        self.assertNotIn("_openwam_video_first", vars(backbone))
+                    else:
+                        self.assertIs(backbone._openwam_video_first, previous)
+
+    def test_gather_launch_precedes_encode_and_wait_runs_on_failure(self):
+        for deferred in (False, True):
+            for fail in (False, True):
+                with self.subTest(deferred=deferred, fail=fail):
+                    encoder, backbone = self.make_encoder()
+                    events = []
+                    dist = Mock()
+                    dist.get_world_size.return_value = 2
+                    dist.get_rank.return_value = 0
+                    work = Mock()
+                    work.wait.side_effect = lambda: events.append("wait")
+                    dist.all_gather_into_tensor.side_effect = (
+                        lambda *a, **kw: events.append("gather") or work
+                    )
+                    # Methods share the definition's stand-in globals.
+                    encoder._gather.__func__.__globals__["dist"] = dist
+                    encoder.deferred = (
+                        types.SimpleNamespace(gather=lambda *a: events.append("gather"))
+                        if deferred
+                        else None
+                    )
+                    encoder.next_batch = lambda: "batch"
+                    encoder.pending = None
+
+                    def prepare(batch):
+                        self.assertIs(backbone._openwam_video_first, True)
+                        events.append("encode")
+                        if fail:
+                            raise RuntimeError("encode failed")
+                        return {"done": True}
+
+                    encoder.architecture.prepare_inputs = prepare
+                    args = ([object()], [[object(), object()]], [object()], 1, 100)
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, "encode failed"):
+                            encoder._gather(*args)
+                        self.assertIsNone(encoder.pending)
+                    else:
+                        encoder._gather(*args)
+                        self.assertEqual(encoder.pending.values, {"done": True})
+                    self.assertEqual(
+                        events, ["gather", "encode"] + ([] if deferred else ["wait"])
+                    )
+                    self.assertNotIn("_openwam_video_first", vars(backbone))
+                    self.assertIsNone(encoder.next_batch)
+
+    def test_no_lookahead_uses_native_gather_without_reordering(self):
+        encoder, backbone = self.make_encoder()
+        encoder.deferred = None
+        encoder.next_batch = None
+        encoder.original_gather = Mock(return_value="native")
+        self.assertEqual(encoder._gather([], [], [], 1, 100), "native")
+        encoder.original_gather.assert_called_once_with([], [], [], 1, 100)
+        self.assertNotIn("_openwam_video_first", vars(backbone))
+
+    def test_preprocess_order_preserves_text_first_for_cached_latents(self):
+        for flag, cached, expected in [
+            (False, False, ["text", "video"]),
+            (True, False, ["video", "text"]),
+            (True, True, ["text"]),
+        ]:
+            with self.subTest(flag=flag, cached=cached):
+                events = []
+                latent = Mock()
+                latent.to.return_value = latent
+                encode = types.SimpleNamespace(
+                    encode_text=lambda *a, **kw: events.append("text")
+                    or ("context", [1]),
+                    encode_video=lambda *a, **kw: events.append("video") or latent,
+                    preprocess_video=Mock(),
+                )
+                fn, _ = load_definition(
+                    "ports/wan.py",
+                    "WanBase_preprocess_input_for_train",
+                    torch=types.SimpleNamespace(cat=Mock()),
+                    wan_encode=encode,
+                    check_resize_height_width=lambda h, w, n, **kw: (h, w, n),
+                )
+                backbone = types.SimpleNamespace(
+                    device="gpu",
+                    dtype="bf16",
+                    _openwam_video_first=flag,
+                    _height_division_factor=32,
+                    _width_division_factor=32,
+                    _time_division_factor=4,
+                    _time_division_remainder=1,
+                    _tokenizer=object(),
+                    text_encoder=object(),
+                    video_encoder=None,
+                    vae=object(),
+                    _variant=types.SimpleNamespace(
+                        build_train_conditioning=Mock(return_value={})
+                    ),
+                )
+                kw = (
+                    {"video_latents": latent, "video_size": (1, 32, 32)}
+                    if cached
+                    else {}
+                )
+                result = fn(
+                    backbone,
+                    frames=[[types.SimpleNamespace(size=(32, 32))]],
+                    text=["prompt"],
+                    **kw,
+                )
+                self.assertEqual(events, expected)
+                self.assertIs(result["input_latents"], latent)
+                self.assertEqual(result["context"], "context")
+
+
 class SchedulingTest(unittest.TestCase):
     def test_installed_options_follow_catalog_targets(self):
         module = types.ModuleType("openwam.model.action_backbone.components")
@@ -219,14 +372,55 @@ class SchedulingTest(unittest.TestCase):
 
     def test_zero_bucket_default_preserves_explicit_override(self):
         configure, _ = load_definition(
-            "__init__.py", "configure_zero", enabled=lambda name: name == "zero_overlap"
+            "__init__.py",
+            "configure_zero",
+            enabled=lambda name: name == "zero_overlap",
+            os=os,
         )
         config = {"zero_optimization": {"stage": 2}}
-        configure(config)
-        self.assertEqual(config["zero_optimization"]["reduce_bucket_size"], 100_000_000)
-        config["zero_optimization"]["reduce_bucket_size"] = 50_000_000
-        configure(config)
-        self.assertEqual(config["zero_optimization"]["reduce_bucket_size"], 50_000_000)
+        torch = types.SimpleNamespace(version=types.SimpleNamespace(hip=None))
+        with patch.dict(sys.modules, {"torch": torch}):
+            configure(config)
+            self.assertEqual(
+                config["zero_optimization"]["reduce_bucket_size"], 100_000_000
+            )
+            config["zero_optimization"]["reduce_bucket_size"] = 50_000_000
+            configure(config)
+            self.assertEqual(
+                config["zero_optimization"]["reduce_bucket_size"], 50_000_000
+            )
+
+    def test_workspace_default_only_applies_to_hip_blaslt_zero2(self):
+        configure, _ = load_definition(
+            "__init__.py",
+            "configure_zero",
+            os=os,
+            enabled=lambda name: name == "zero_overlap",
+        )
+        for hip, stage, prefer in [
+            (None, 2, "1"),
+            ("test", 1, "1"),
+            ("test", 2, "0"),
+            ("test", 2, "1"),
+        ]:
+            with self.subTest(hip=hip, stage=stage, prefer=prefer):
+                torch = types.SimpleNamespace(version=types.SimpleNamespace(hip=hip))
+                with patch.dict(sys.modules, {"torch": torch}), patch.dict(
+                    os.environ, {"TORCH_BLAS_PREFER_HIPBLASLT": prefer}, clear=True
+                ):
+                    configure({"zero_optimization": {"stage": stage}})
+                    self.assertEqual(
+                        os.environ.get("HIPBLASLT_WORKSPACE_SIZE"),
+                        "32768" if hip and stage == 2 and prefer == "1" else None,
+                    )
+        torch = types.SimpleNamespace(version=types.SimpleNamespace(hip="test"))
+        for key in ("HIPBLASLT_WORKSPACE_SIZE", "CUBLASLT_WORKSPACE_SIZE"):
+            env = {"TORCH_BLAS_PREFER_HIPBLASLT": "1", key: "0"}
+            with self.subTest(override=key), patch.dict(
+                sys.modules, {"torch": torch}
+            ), patch.dict(os.environ, env, clear=True):
+                configure({"zero_optimization": {"stage": 2}})
+                self.assertEqual(dict(os.environ), env)
 
     def test_bias2d_uses_torch_backend_enum(self):
         tree = ast.parse((MODEL / "linear_bias2d.py").read_text(encoding="utf-8"))

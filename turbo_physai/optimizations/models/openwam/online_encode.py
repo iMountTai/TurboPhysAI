@@ -1,5 +1,5 @@
 # Modified by Hygon Information Technology Co., Ltd., 2026.
-# Derived from OpenWAM main d1ea554ba44057b766fff94c0d999fb11a217ffb.
+# Derived from OpenWAM main ac8aab4f6ba16b1739c94df823cc444478e9dab0.
 # SPDX-License-Identifier: Apache-2.0
 
 """One real batch of lookahead encoding during the ZeRO-2 parameter AllGather."""
@@ -118,6 +118,25 @@ class OnlineEncoder:
         self.next_batch = None
         self.pending = None
 
+    def _prepare_lookahead(self, batch):
+        # Reorder only after gather launches. Initial/fallback batches retain
+        # the native T5-first allocation and compilation order.
+        backbone = self.architecture.video_backbone
+        missing = object()
+        previous = backbone.__dict__.get("_openwam_video_first", missing)
+        backbone._openwam_video_first = True
+        try:
+            with torch.no_grad():
+                values = self.architecture.prepare_inputs(
+                    batch if isinstance(batch, list) else [batch]
+                )
+            return PreparedInputs(values)
+        finally:
+            if previous is missing:
+                del backbone._openwam_video_first
+            else:
+                backbone._openwam_video_first = previous
+
     def _gather(
         self,
         groups_flat,
@@ -135,11 +154,7 @@ class OnlineEncoder:
             if self.next_batch is not None:
                 take, self.next_batch = self.next_batch, None
                 batch = take()
-                with torch.no_grad():
-                    values = self.architecture.prepare_inputs(
-                        batch if isinstance(batch, list) else [batch]
-                    )
-                self.pending = PreparedInputs(values)
+                self.pending = self._prepare_lookahead(batch)
             return
         if self.next_batch is None:
             return self.original_gather(
@@ -167,11 +182,7 @@ class OnlineEncoder:
             # The collective has captured its dependency on the optimizer update;
             # everything enqueued below runs on the compute stream alongside it.
             batch = take()
-            with torch.no_grad():
-                values = self.architecture.prepare_inputs(
-                    batch if isinstance(batch, list) else [batch]
-                )
-            self.pending = PreparedInputs(values)
+            self.pending = self._prepare_lookahead(batch)
         finally:
             # Work.wait makes the training stream wait for the gathered
             # parameters; it must follow the encode so the two overlap. It also

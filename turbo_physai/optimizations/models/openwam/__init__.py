@@ -4,6 +4,7 @@
 """OpenWAM model preparation and Turbo-configured optimization helpers."""
 
 import logging
+import os
 from .settings import enabled, value as value
 from .launch import configure_backends as configure_backends
 
@@ -45,6 +46,17 @@ def configure_zero(config: dict) -> None:
         # Bucket size is in elements, not bytes.
         if zero.get("stage") == 2:
             zero.setdefault("reduce_bucket_size", 100_000_000)
+            import torch
+
+            # PyTorch also prioritizes CUBLASLT_WORKSPACE_SIZE on HIP. Preserve
+            # either explicit override; this default is in KiB (32 MiB).
+            if (
+                torch.version.hip
+                and os.environ.get("TORCH_BLAS_PREFER_HIPBLASLT") == "1"
+                and "CUBLASLT_WORKSPACE_SIZE" not in os.environ
+                and "HIPBLASLT_WORKSPACE_SIZE" not in os.environ
+            ):
+                os.environ["HIPBLASLT_WORKSPACE_SIZE"] = "32768"
 
 
 def prepare_model(architecture) -> None:

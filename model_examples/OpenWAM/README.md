@@ -1,6 +1,6 @@
 # OpenWAM
 
-本接入参考 OpenWAM `main` 的 `d1ea554ba44057b766fff94c0d999fb11a217ffb`，在运行时替换函数及其调用别名，模型源码不需要打补丁。使用原生 Wan 视频骨干和 ActionDiT，主要面向 `dual_system/joint_self_attn` 训练。
+本接入参考 OpenWAM `main` 的 `ac8aab4f6ba16b1739c94df823cc444478e9dab0`，在运行时替换函数及其调用别名，模型源码不需要打补丁。使用原生 Wan 视频骨干和 ActionDiT，主要面向 `dual_system/joint_self_attn` 训练。
 
 优化接入基线为 `1204dde1b9e9c232131fc99a3f2c6b78330e7f64`。请使用该上游基线，不要叠加已经内置同类优化的 OpenWAM 分支。随包配置记录了基线函数的 AST 身份；目前完成的是必要静态检查，尚未在训练环境验证多卡正确性、数值、收敛或性能。
 
@@ -52,6 +52,10 @@ ZeRO-2 增加有界梯度批量入桶、owner 范围计划缓存、分区复制�
 `openwam.training` 另提供两个默认关闭的可选优化：`zero_scaled_pack` 将稀疏 owner 的 BF16 缩放与打包融合；`zero_norm_overlap` 在最终梯度累积完成后，于侧流计算分区范数。两者均要求 `zero_reduce_scatter=true`；使用 Triton 的目标环境需安装匹配版本。数值裁剪边界及多卡收益仍需目标环境验证。
 
 在线编码在梯度累积大于 1 或无 DataLoader worker 时保留普通训练与 Deferred Gather 路径。Host 异步复用 ZeRO 已计算的设备端梯度范数，避免 getter 的标量同步。缓存支持目录迁移后按元数据匹配旧 reader key，生成与读取共用相同 key。
+
+后续增量已对齐 `main@ac8aab4`：仅在 AllGather 或 Deferred Gather 已启动后的下一批预处理窗口中先执行 VAE、再执行 T5，以重叠编码和通信；初始批、普通调用和离线 latent 输入保持原有 T5 优先顺序。临时调度状态在预处理结束或异常时恢复。上游已撤回的 worker 像素打包和全局 VAE 优先实验未纳入。
+
+启用 `zero_overlap`、ZeRO-2 且使用 HIP BLASLt（`TORCH_BLAS_PREFER_HIPBLASLT=1`）时，若用户未设置 `CUBLASLT_WORKSPACE_SIZE` 或 `HIPBLASLT_WORKSPACE_SIZE`，接入会在 Accelerate 的 DeepSpeed 配置边界将后者默认为 `32768` KiB（32 MiB）。任一显式 workspace 配置均保留。应从 Turbo 启动训练，使配置在第一次 BLASLt 调用前生效；已有进程中初始化过的库不适合作为该默认值的验证环境。
 
 ## 自定义 options
 

@@ -7,7 +7,8 @@ This file records the provenance of source code distributed in TurboPhysAI. The 
 ### OpenWAM / native Wan training
 
 - Source repository: <https://github.com/iMountTai/OpenWAM>
-- Source branch and fixed commit: `main` @ `d1ea554ba44057b766fff94c0d999fb11a217ffb`
+- Source branch and fixed commit: `main` @ `ac8aab4f6ba16b1739c94df823cc444478e9dab0`
+- Existing ports retain their original derivation headers; `online_encode.py`, `ports/wan.py` and ZeRO configuration in `__init__.py` include the later post-gather scheduling and HIP BLASLt workspace updates.
 - Runtime target baseline: `1204dde1b9e9c232131fc99a3f2c6b78330e7f64`
 - License: Apache-2.0, including the source's native Wan license material.
 - Local source ports and helper modules are modified; they retain Apache-2.0 identifiers and Hygon modification notices. Original class identities are retained; functions are installed as Turbo wrappers.

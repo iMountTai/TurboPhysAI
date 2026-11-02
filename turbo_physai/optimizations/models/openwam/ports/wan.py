@@ -1,5 +1,5 @@
 # Modified by Hygon Information Technology Co., Ltd., 2026.
-# Derived from OpenWAM main d1ea554ba44057b766fff94c0d999fb11a217ffb.
+# Derived from OpenWAM main ac8aab4f6ba16b1739c94df823cc444478e9dab0.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -286,12 +286,16 @@ def WanBase_preprocess_input_for_train(self, *, frames=None, text=None, **kw) ->
     )
 
     batch_size = len(frames)
-    context, seq_lens = wan_encode.encode_text(
-        text,
-        tokenizer=self._tokenizer,
-        text_encoder=self.text_encoder,
-        device=self.device,
-    )
+    # OnlineEncoder enables this only inside post-gather lookahead preparation.
+    # Stored latents and initial/fallback batches retain native text-first order.
+    video_first = video_latents is None and getattr(self, "_openwam_video_first", False)
+    if not video_first:
+        context, seq_lens = wan_encode.encode_text(
+            text,
+            tokenizer=self._tokenizer,
+            text_encoder=self.text_encoder,
+            device=self.device,
+        )
 
     stacked_inputs = None
     if video_latents is not None:
@@ -312,6 +316,14 @@ def WanBase_preprocess_input_for_train(self, *, frames=None, text=None, **kw) ->
             stacked_inputs, vae=self.vae, encoder=self.video_encoder
         )
         input_latents = input_latents.to(dtype=dtype, device=device)
+
+    if video_first:
+        context, seq_lens = wan_encode.encode_text(
+            text,
+            tokenizer=self._tokenizer,
+            text_encoder=self.text_encoder,
+            device=self.device,
+        )
 
     # Variant-specific first-frame / control conditioning lives in
     # ``self._variant``, so this method carries no per-variant ``if``.
