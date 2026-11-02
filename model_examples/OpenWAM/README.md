@@ -1,16 +1,12 @@
 # OpenWAM 运行指南
 
-本接入参考 OpenWAM `main` 的 `ac8aab4f6ba16b1739c94df823cc444478e9dab0`，在运行时替换函数及其调用别名，模型源码不需要打补丁。使用原生 Wan 视频骨干和 ActionDiT，主要面向 `dual_system/joint_self_attn` 训练。
-
-优化接入基线为 `1204dde1b9e9c232131fc99a3f2c6b78330e7f64`。请使用该上游基线，不要叠加已经内置同类优化的 OpenWAM 分支。随包配置记录了基线函数的 AST 身份；目前完成的是必要静态检查，尚未在训练环境验证多卡正确性、数值、收敛或性能。
-
 ## 环境准备
 
-以下命令在 Linux HCU 训练容器内、同一个 Bash 会话中依次执行。先激活已有的 OpenWAM 训练环境：DTK、HCU PyTorch、FlashAttention、DeepSpeed 和 Accelerate 应已匹配；Turbo 源码构建还需要 hipDNN、Ninja 及编译器，详见[安装指南](../../docs/zh/get_started/installation.md#从源码安装)。在线优化配方还需要匹配当前 PyTorch/DTK 的 Lightop。不要直接套用 Cosmos 分支的镜像版本替换现有 OpenWAM 训练环境。
+在 Linux HCU 训练容器中激活 OpenWAM 环境，按顺序执行以下命令。环境需包含匹配的 DTK、HCU PyTorch、FlashAttention、DeepSpeed 和 Accelerate；Turbo 构建依赖见[安装指南](../../docs/zh/get_started/installation.md#从源码安装)，在线优化配方还需要 Lightop。
 
 ### 准备代码并切换版本
 
-当前接入尚在 Draft PR 分支，Turbo 从 fork 的 `feat/openwam` 获取；OpenWAM 从来源仓库获取，创建固定在**未内置优化的基线提交**上的本地分支。`ac8aab4` 是优化的参考来源，运行时 OpenWAM 应切换到 `1204dde1`。
+克隆 Turbo 的 `feat/openwam` 分支，将 OpenWAM 切换到 `1204dde1`，并创建本地分支 `turbo-baseline`：
 
 ```bash
 export WORKSPACE=/path/to/openwam-turbo-workspace
@@ -33,7 +29,7 @@ test "$(git rev-parse HEAD)" = "$OPENWAM_BASELINE"
 git status --short --branch
 ```
 
-`WORKSPACE` 请设为实际绝对路径；两个仓库为相邻目录，配置和输出写入仓库之外的 `RUN_ROOT`。本接入通过 Turbo 在运行时安装 monkey-patch，准备好基线后直接安装和启动，无需执行 `git apply`。当前 Wan 场景无需初始化 Cosmos 子模块。
+将 `WORKSPACE` 替换为实际绝对路径。后续命令沿用同一 Bash 会话中的变量，配置和输出保存在 `RUN_ROOT`。
 
 ### 安装代码
 
